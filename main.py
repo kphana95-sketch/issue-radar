@@ -15,7 +15,6 @@ APP_PASSWORD = os.environ.get("APP_PASSWORD")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = 'gemini-3.8-flash'
 
 # 1. 경쟁사 실시간 랭킹 뉴스 크롤링 (한국경제 제외)
 def fetch_target_news():
@@ -93,31 +92,39 @@ prompt = f"""
 (현재 포털 독자들의 관심 흐름과 주의사항 요약)
 """
 
-# 3. 제미나이 호출 (단일 유효 모델 gemini-3.8-flash 대상 429/503 쿨다운 재시도)
+# 3. 제미나이 호출 (무료 쿼터가 넉넉한 안정화 모델 우선 순차 시도)
 print("2. 제미나이 이슈 분석 진행 중...")
 result_text = None
-max_retries = 4
 
-for attempt in range(1, max_retries + 1):
-    try:
-        print(f"-> {MODEL_NAME} 호출 시도 ({attempt}/{max_retries})...")
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-        )
-        if response and response.text:
-            result_text = response.text
-            print("-> 제미나이 이슈 분석 성공!")
-            break
-    except Exception as e:
-        err_str = str(e)
-        # 429 할당량 쿨다운 또는 503 과부하일 경우 35초 대기
-        wait_seconds = 35 if ("429" in err_str or "503" in err_str) else 10
-        print(f"경고: {attempt}차 시도 오류 ({err_str[:60]}...). {wait_seconds}초 쿨다운 후 재시도합니다.")
-        time.sleep(wait_seconds)
+# 무료 계정에서 할당량이 가장 여유로운 모델 후보군 순차 배치
+candidate_models = [
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-3.8-flash'
+]
+
+for model_name in candidate_models:
+    print(f"-> 모델 시도: {model_name}...")
+    for retry in range(1, 3):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            if response and response.text:
+                result_text = response.text
+                print(f"-> [{model_name}] 이슈 분석 성공!")
+                break
+        except Exception as e:
+            err_msg = str(e)
+            print(f"   [{model_name}] ({retry}/2차) 에러: {err_msg[:70]}...")
+            time.sleep(3)
+    if result_text:
+        break
 
 if not result_text:
-    raise RuntimeError("구글 API 쿼터 한도 또는 서버 과부하로 완료하지 못했습니다.")
+    raise RuntimeError("모든 제미나이 모델 호출에 실패했습니다.")
 
 print("\n--- [분석 결과 요약] ---")
 print(result_text[:400] + "...\n")
