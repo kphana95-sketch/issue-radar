@@ -15,9 +15,8 @@ APP_PASSWORD = os.environ.get("APP_PASSWORD")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = 'gemini-3.8-flash'
 
-# 1. 경쟁사 실시간 랭킹 뉴스 크롤링
+# 1. 경쟁사 실시간 랭킹 뉴스 크롤링 (한국경제 제외)
 def fetch_target_news():
     url = "https://news.naver.com/main/ranking/popularDay.naver"
     headers = {
@@ -49,7 +48,7 @@ def fetch_target_news():
                     
     return collected
 
-print("1. 경쟁사 랭킹 기사 수집 중...")
+print("1. 경쟁사 랭킹 기사 수집 중 (한국경제 제외)...")
 news_list = fetch_target_news()
 print(f"-> 총 {len(news_list)}개 타사 기사 수집 완료!")
 news_context = "\n".join(news_list)
@@ -93,29 +92,33 @@ prompt = f"""
 (현재 포털 독자들의 관심 흐름과 주의사항 요약)
 """
 
-# 3. 제미나이 호출 (5단계 지수 백오프 적용)
+# 3. 제미나이 호출 (429 할당량 초과 및 503 과부하 방지 모델 폴백)
 print("2. 제미나이 이슈 분석 진행 중...")
 result_text = None
-max_retries = 5
+# 3.8-flash 쿼터 소진 시 2.5-flash로 자동 전환
+candidate_models = ['gemini-2.5-flash', 'gemini-3.8-flash']
 
-for attempt in range(1, max_retries + 1):
-    try:
-        print(f"-> {MODEL_NAME} 호출 시도 ({attempt}/{max_retries})...")
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-        )
-        if response and response.text:
-            result_text = response.text
-            print("-> 제미나이 이슈 분석 완료!")
-            break
-    except Exception as e:
-        wait_seconds = attempt * 5  # 5초, 10초, 15초, 20초, 25초 순차 대기
-        print(f"경고: {attempt}차 시도 오류 ({e}). {wait_seconds}초 후 재시도합니다.")
-        time.sleep(wait_seconds)
+for model_name in candidate_models:
+    print(f"-> 모델 시도: {model_name}...")
+    for attempt in range(1, 3):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            if response and response.text:
+                result_text = response.text
+                print(f"-> [{model_name}] 이슈 분석 성공!")
+                break
+        except Exception as e:
+            err_str = str(e)
+            print(f"경고: {model_name} ({attempt}/2차 시도) 오류 발생 ({err_str[:60]}...)")
+            time.sleep(5)
+    if result_text:
+        break
 
 if not result_text:
-    raise RuntimeError("구글 서버 과부하가 지속되어 요청을 완료하지 못했습니다. 잠시 후 다시 실행해 주세요.")
+    raise RuntimeError("모든 모델의 일일 한도 초과 또는 과부하 상태입니다.")
 
 print("\n--- [분석 결과 요약] ---")
 print(result_text[:400] + "...\n")
