@@ -26,7 +26,6 @@ def fetch_target_news():
     res = requests.get(url, headers=headers)
     soup = BeautifulSoup(res.text, 'html.parser')
     
-    # 모니터링 지정 경쟁사
     target_press_list = ['연합뉴스', '조선일보', '중앙일보', '매일경제', '아시아경제', '서울경제']
     collected = []
     
@@ -35,12 +34,11 @@ def fetch_target_news():
         press_elem = box.select_one('.rankingnews_name')
         press_name = press_elem.get_text(strip=True) if press_elem else ""
         
-        # 한국경제 제외 및 타깃 언론사만 수집
         if "한국경제" in press_name or press_name not in target_press_list:
             continue
             
         news_items = box.select('.rankingnews_list > li')
-        for item in news_items[:5]:  # 언론사별 상위 5개씩 수집
+        for item in news_items[:5]:
             title_elem = item.select_one('.list_content > a') or item.select_one('a')
             if title_elem:
                 title = title_elem.get_text(strip=True)
@@ -54,7 +52,7 @@ news_list = fetch_target_news()
 print(f"-> 총 {len(news_list)}개 타사 기사 수집 완료!")
 news_context = "\n".join(news_list)
 
-# 2. 제미나이 데스킹 프롬프트 (한경 온라인 당직 에디터 맞춤 선별 기준)
+# 2. 제미나이 데스킹 프롬프트
 prompt = f"""
 당신은 한국경제신문 디지털뉴스룸의 실시간 이슈 모니터링 당직 데스크입니다.
 수집된 경쟁사 인기 랭킹 기사 목록에서, 당직 근무 시간대에 온라인 트래픽을 견인할 수 있는 [실시간 화제 이슈 TOP 5]를 선별하고 발제 앵글을 브리핑하세요.
@@ -93,13 +91,14 @@ prompt = f"""
 (현재 포털 독자들의 관심 흐름과 주의사항 요약)
 """
 
-# 3. 제미나이 호출 (정식 모델 gemini-3.8-flash)
+# 3. 제미나이 호출 (503 완화용 5단계 지수 백오프)
 print("2. 제미나이 이슈 분석 진행 중...")
 result_text = None
+max_retries = 5
 
-for attempt in range(1, 4):
+for attempt in range(1, max_retries + 1):
     try:
-        print(f"-> {MODEL_NAME} 호출 시도 ({attempt}/3)...")
+        print(f"-> {MODEL_NAME} 호출 시도 ({attempt}/{max_retries})...")
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=prompt,
@@ -109,12 +108,13 @@ for attempt in range(1, 4):
             print("-> 이슈 분석 완료!")
             break
     except Exception as e:
+        wait_seconds = attempt * 5
         err_msg = str(e)
-        print(f"   ({attempt}/3차) 오류: {err_msg[:70]}...")
-        time.sleep(5)
+        print(f"   ({attempt}/{max_retries}차) 일시 지연: {err_msg[:60]}... {wait_seconds}초 대기 후 재시도")
+        time.sleep(wait_seconds)
 
 if not result_text:
-    raise RuntimeError("API 요청 처리에 실패했습니다. API 키 쿼터 상태를 확인해 주세요.")
+    raise RuntimeError("구글 서버 과부하가 지속되어 요청을 완료하지 못했습니다. 잠시 후 다시 실행해 주세요.")
 
 print("\n--- [분석 결과 요약] ---")
 print(result_text[:400] + "...\n")
