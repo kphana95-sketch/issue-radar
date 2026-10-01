@@ -14,9 +14,12 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
 APP_PASSWORD = os.environ.get("APP_PASSWORD")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY 환경변수가 설정되지 않았습니다.")
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 1순위 모델 및 구글 과부하 시 즉각 전환할 대체 모델 풀
+# 1순위 모델 및 순차 대체 모델 풀
 MODELS_TO_TRY = [
     'gemini-3.8-flash',
     'gemini-flash-latest',
@@ -97,7 +100,7 @@ prompt = f"""
 (현재 포털 독자들의 관심 흐름과 주의사항 요약)
 """
 
-# 3. 제미나이 데스킹 호출 (Fallback 모델 풀 + 지수 백오프)
+# 3. 제미나이 데스킹 호출 (Chat 방식 적용 및 상세 에러 진단)
 print("2. 제미나이 이슈 분석 진행 중...")
 result_text = None
 max_retries_per_model = 3
@@ -110,10 +113,9 @@ for current_model in MODELS_TO_TRY:
         try:
             print(f"-> [{current_model}] 호출 시도 ({attempt}/{max_retries_per_model})...")
             
-            response = client.models.generate_content(
-                model=current_model,
-                contents=prompt
-            )
+            # Chat 방식을 사용하여 AFC 충돌 방지 및 안정적 호출
+            chat = client.chats.create(model=current_model)
+            response = chat.send_message(prompt)
             
             if response and response.text:
                 result_text = response.text.strip()
@@ -123,23 +125,28 @@ for current_model in MODELS_TO_TRY:
         except Exception as e:
             err_msg = str(e)
             
-            # 지원하지 않는 모델(404)은 즉시 다음 모델로 패스
+            # 모델 미지원(404)은 즉시 다음 모델로 패스
             if "404" in err_msg or "NOT_FOUND" in err_msg:
-                print(f"   [{current_model}] 지원하지 않는 모델명(404). 다음 대체 모델로 전환합니다.")
+                print(f"   [{current_model}] 지원하지 않는 모델명(404). 즉시 대체 모델로 전환합니다.")
                 break
                 
-            # 일시적인 503(과부하) 또는 429(요청 제한)는 점진 대기 후 재시도
-            wait_seconds = attempt * 5
-            print(f"   [{current_model}] ({attempt}/{max_retries_per_model}차) 서버 지연 발생: {wait_seconds}초 대기 후 재시도...")
-            time.sleep(wait_seconds)
+            # 할당량 초과(429) 또는 서버 과부하(503) 발생 시
+            if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                wait_seconds = attempt * 5
+                print(f"   [{current_model}] ({attempt}/{max_retries_per_model}차) 일시 지연: {err_msg[:70]}... {wait_seconds}초 대기 후 재시도")
+                time.sleep(wait_seconds)
+            else:
+                # API 키 오류 등 복구 불가능한 에러 상세 출력 후 다음 모델 진행
+                print(f"   [{current_model}] 호출 실패(원인): {err_msg}")
+                break
 
     if model_success:
         break
     else:
-        print(f"   ⚠️ [{current_model}] 실패. 다음 대체 모델로 전환합니다.")
+        print(f"   ⚠️ [{current_model}] 최종 실패. 다음 모델로 전환합니다.")
 
 if not result_text:
-    raise RuntimeError("모든 가용 제미나이 모델이 일시 과부하 상태입니다.")
+    raise RuntimeError("모든 제미나이 모델 호출에 실패했습니다.")
 
 print("\n--- [분석 결과 요약] ---")
 print(result_text[:400] + "...\n")
