@@ -19,13 +19,6 @@ if not GEMINI_API_KEY:
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 1순위 모델 및 순차 대체 모델 풀
-MODELS_TO_TRY = [
-    'gemini-3.8-flash',
-    'gemini-flash-latest',
-    'gemini-pro-latest'
-]
-
 # 1. 경쟁사 실시간 랭킹 뉴스 크롤링 (한국경제 제외)
 def fetch_target_news():
     url = "https://news.naver.com/main/ranking/popularDay.naver"
@@ -61,10 +54,10 @@ news_list = fetch_target_news()
 print(f"-> 총 {len(news_list)}개 타사 기사 수집 완료!")
 news_context = "\n".join(news_list)
 
-# 2. 제미나이 데스킹 프롬프트
+# 2. 제미나이 데스킹 프롬프트 (TOP 7 확대)
 prompt = f"""
 당신은 한국경제신문 디지털뉴스룸의 실시간 이슈 모니터링 당직 데스크입니다.
-수집된 경쟁사 인기 랭킹 기사 목록에서, 당직 근무 시간대에 온라인 트래픽을 견인할 수 있는 [실시간 화제 이슈 TOP 5]를 선별하고 발제 앵글을 브리핑하세요.
+수집된 경쟁사 인기 랭킹 기사 목록에서, 당직 근무 시간대에 온라인 트래픽을 견인할 수 있는 [실시간 화제 이슈 TOP 7]을 선별하고 발제 앵글을 브리핑하세요.
 
 [선별 및 배제 기준 (철저 준수)]
 1. 배제 대상 (절대 선별 금지):
@@ -72,7 +65,7 @@ prompt = f"""
    - 거시 지표 중심의 딱딱한 경제/금융 분석 기사.
    - 트럼프 관세 발언, 정상회담 등 일반적인 거시 국제 정치 뉴스.
    - 단순 연예인 결혼, 열애, 결별, 단순 드라마·예능 출연 홍보 기사.
-2. 적극 선별 대상 (트래픽 및 명분 중심):
+2. 적극 선별 대상 (트래픽 및 명분 중심, 후보를 폭넓고 다양하게 7개 선별):
    - [사회/사건사고]: 온라인 공분을 일으키는 갑질, 황당 사고, 논란의 현장, 사기 수법 등 화제성 르포.
    - [생활/소비/문화]: 밥상 물가, SNS 유행 아이템, 직장인 공감 트렌드, 황당 민원.
    - [국제 토픽]: 정치 외교가 아닌 글로벌 바이럴 토픽(기상천외한 해외 사건·사고, 글로벌 진기명기 등).
@@ -85,7 +78,7 @@ prompt = f"""
 {news_context}
 
 [출력 양식]
-■ [당직 실시간 이슈 레이더 TOP 5]
+■ [당직 실시간 이슈 레이더 TOP 7]
 
 01. [이슈 타이틀]
 - 기사 유형: (사회사건사고 / 명분있는연예 / 생활문화트렌드 / 해외토픽 중 택1)
@@ -93,60 +86,72 @@ prompt = f"""
 - 화제 및 클릭 유입 포인트: (독자들이 왜 이 기사에 열광/분노하는지)
 - 한경 온라인 발제 앵글: (우리가 기사화할 때 살려야 할 명분과 차별화 팁)
 
-(02번~05번 동일 형식으로 작성)
+(02번~07번까지 동일 형식으로 7개 모두 작성)
 
 ---
 ■ [당직 데스크의 트래픽 한 줄 팁]
 (현재 포털 독자들의 관심 흐름과 주의사항 요약)
 """
 
-# 3. 제미나이 데스킹 호출 (Chat 방식 적용 및 상세 에러 진단)
-print("2. 제미나이 이슈 분석 진행 중...")
+# 3. 실시간 동적 가용 모델 탐색 및 데스킹 호출
+print("2. 제미나이 가용 모델 탐색 및 데스킹 진행 중...")
+
+def get_dynamic_models():
+    detected = []
+    try:
+        for m in client.models.list():
+            name = m.name.replace("models/", "") if hasattr(m, 'name') else str(m)
+            if "gemini" in name.lower() and not any(k in name.lower() for k in ['embedding', 'aqa', 'imagen', 'live']):
+                detected.append(name)
+    except Exception as e:
+        print(f"모델 실시간 조회 실패, 기본 목록 사용: {e}")
+
+    flash_models = [m for m in detected if "flash" in m.lower()]
+    pro_models = [m for m in detected if "pro" in m.lower() and m not in flash_models]
+    
+    final_list = flash_models + pro_models
+    fallback_defaults = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-pro-latest']
+    return list(dict.fromkeys(final_list + fallback_defaults))
+
+models_to_try = get_dynamic_models()
 result_text = None
 max_retries_per_model = 3
 
-for current_model in MODELS_TO_TRY:
-    print(f"\n[모델 시도] '{current_model}' 호출을 시작합니다.")
+for current_model in models_to_try:
+    print(f"\n[모델 시도] '{current_model}' 호출 중...")
     model_success = False
 
     for attempt in range(1, max_retries_per_model + 1):
         try:
-            print(f"-> [{current_model}] 호출 시도 ({attempt}/{max_retries_per_model})...")
-            
-            # Chat 방식을 사용하여 AFC 충돌 방지 및 안정적 호출
             chat = client.chats.create(model=current_model)
             response = chat.send_message(prompt)
             
             if response and response.text:
                 result_text = response.text.strip()
-                print(f"-> [{current_model}] 이슈 분석 완료!")
+                print(f"-> [{current_model}] 데스킹 성공!")
                 model_success = True
                 break
         except Exception as e:
             err_msg = str(e)
-            
-            # 모델 미지원(404)은 즉시 다음 모델로 패스
             if "404" in err_msg or "NOT_FOUND" in err_msg:
-                print(f"   [{current_model}] 지원하지 않는 모델명(404). 즉시 대체 모델로 전환합니다.")
+                print(f"   [{current_model}] 404 미지원 모델. 다음으로 넘어갑니다.")
                 break
                 
-            # 할당량 초과(429) 또는 서버 과부하(503) 발생 시
-            if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                wait_seconds = attempt * 5
-                print(f"   [{current_model}] ({attempt}/{max_retries_per_model}차) 일시 지연: {err_msg[:70]}... {wait_seconds}초 대기 후 재시도")
-                time.sleep(wait_seconds)
+            if any(k in err_msg for k in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                wait_sec = attempt * 5
+                print(f"   [{current_model}] ({attempt}/{max_retries_per_model}차) 일시 지연: {wait_sec}초 대기 후 재시도...")
+                time.sleep(wait_sec)
             else:
-                # API 키 오류 등 복구 불가능한 에러 상세 출력 후 다음 모델 진행
-                print(f"   [{current_model}] 호출 실패(원인): {err_msg}")
+                print(f"   [{current_model}] 처리 에러: {err_msg[:80]}...")
                 break
 
     if model_success:
         break
     else:
-        print(f"   ⚠️ [{current_model}] 최종 실패. 다음 모델로 전환합니다.")
+        print(f"   ⚠️ [{current_model}] 응답 불가. 다음 후보 모델로 자동 전환합니다.")
 
 if not result_text:
-    raise RuntimeError("모든 제미나이 모델 호출에 실패했습니다.")
+    raise RuntimeError("모든 가용 제미나이 모델 호출에 실패했습니다.")
 
 print("\n--- [분석 결과 요약] ---")
 print(result_text[:400] + "...\n")
@@ -168,5 +173,5 @@ def send_email(subject, body_text):
     print("🎉 이메일 브리핑 발송 완료!")
 
 now_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%m월 %d일 %H시")
-mail_title = f"[{now_str} 당직 이슈 레이더] 타사 랭킹 핫이슈 TOP 5 및 한경 발제 앵글"
+mail_title = f"[{now_str} 당직 이슈 레이더] 타사 랭킹 핫이슈 TOP 7 및 한경 발제 앵글"
 send_email(mail_title, result_text)
