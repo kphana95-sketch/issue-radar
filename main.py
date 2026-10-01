@@ -16,6 +16,13 @@ RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# 1순위 모델 및 구글 과부하 시 즉각 전환할 대체 모델 풀
+MODELS_TO_TRY = [
+    'gemini-3.8-flash',
+    'gemini-flash-latest',
+    'gemini-pro-latest'
+]
+
 # 1. 경쟁사 실시간 랭킹 뉴스 크롤링 (한국경제 제외)
 def fetch_target_news():
     url = "https://news.naver.com/main/ranking/popularDay.naver"
@@ -90,44 +97,46 @@ prompt = f"""
 (현재 포털 독자들의 관심 흐름과 주의사항 요약)
 """
 
-# 3. 제미나이 호출 (가용 모델 자동 식별 및 다중 백오프)
+# 3. 제미나이 데스킹 호출 (Fallback 모델 풀 + 지수 백오프)
 print("2. 제미나이 이슈 분석 진행 중...")
-available_models = []
-try:
-    for m in client.models.list():
-        name = m.name.replace("models/", "") if hasattr(m, 'name') else ""
-        methods = getattr(m, 'supported_generation_methods', []) or getattr(m, 'supported_actions', [])
-        if "generateContent" in methods or not methods:
-            if "flash" in name.lower() or "gemini" in name.lower():
-                available_models.append(name)
-except Exception as e:
-    print(f"모델 목록 조회 생략: {e}")
-
-priority_models = ['gemini-3.8-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-1.5-pro']
-test_queue = [m for m in priority_models if m in available_models] or priority_models
-models_to_try = list(dict.fromkeys(test_queue))
-
 result_text = None
-for model_candidate in models_to_try:
-    print(f"-> 모델 시도: {model_candidate}...")
-    for retry in range(1, 3):
+max_retries_per_model = 3
+
+for current_model in MODELS_TO_TRY:
+    print(f"\n[모델 시도] '{current_model}' 호출을 시작합니다.")
+    model_success = False
+
+    for attempt in range(1, max_retries_per_model + 1):
         try:
+            print(f"-> [{current_model}] 호출 시도 ({attempt}/{max_retries_per_model})...")
+            
             response = client.models.generate_content(
-                model=model_candidate,
-                contents=prompt,
+                model=current_model,
+                contents=prompt
             )
+            
             if response and response.text:
-                result_text = response.text
-                print(f"-> [{model_candidate}] 이슈 분석 성공!")
+                result_text = response.text.strip()
+                print(f"-> [{current_model}] 이슈 분석 완료!")
+                model_success = True
                 break
         except Exception as e:
             err_msg = str(e)
-            if "404" in err_msg:
+            
+            # 지원하지 않는 모델(404)은 즉시 다음 모델로 패스
+            if "404" in err_msg or "NOT_FOUND" in err_msg:
+                print(f"   [{current_model}] 지원하지 않는 모델명(404). 다음 대체 모델로 전환합니다.")
                 break
-            print(f"   [{model_candidate}] ({retry}/2차) 일시 지연: {err_msg[:60]}...")
-            time.sleep(5)
-    if result_text:
+                
+            # 일시적인 503(과부하) 또는 429(요청 제한)는 점진 대기 후 재시도
+            wait_seconds = attempt * 5
+            print(f"   [{current_model}] ({attempt}/{max_retries_per_model}차) 서버 지연 발생: {wait_seconds}초 대기 후 재시도...")
+            time.sleep(wait_seconds)
+
+    if model_success:
         break
+    else:
+        print(f"   ⚠️ [{current_model}] 실패. 다음 대체 모델로 전환합니다.")
 
 if not result_text:
     raise RuntimeError("모든 가용 제미나이 모델이 일시 과부하 상태입니다.")
